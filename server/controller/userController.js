@@ -237,7 +237,7 @@ const getAllImages = async (req, res) => {
         const videosWithAuthors = await Promise.all(images.map(async (file) => {
 
             const author = await db.collection('users').findOne({ _id: new ObjectId(file.metadata.userId) });
-            // console.log(file._id)
+            // console.log('author:',author)
             return {
                 videoId: file.metadata.videoID,
                 userId: author._id,
@@ -354,5 +354,30 @@ const DisplayThumbnails = (req, res) => {
     file.pipe(res)
 }
 
+const DeleteVideo = async (req, res) => {
+    try {
+        const videoId = new ObjectId(req.params.videoId)
+        const checkVideo = await db.collection('thumbnails.files').findOne({ _id: videoId })
 
-module.exports = { Register, Welcome, Login, Profile, uploadProfile, uploadVideo, streamImage, getAllImages, VideoPage, userIdVideoPage, DisplayVideosVideoPage, DisplayThumbnails }
+       
+        if (!checkVideo) {
+            console.log('cannot find video id')
+            return;
+        }
+
+        console.log('videoID associated:', checkVideo.metadata.videoID)
+        await db.collection('thumbnails.files').deleteOne({ _id: new ObjectId(checkVideo._id) })
+
+        if(!checkVideo.metadata.videoID){
+            console.log('error')
+            return;
+        }
+        const deleteVideo = await db.collection('videos.files').deleteOne({ _id: new ObjectId(checkVideo.metadata.videoID) })
+        res.json(deleteVideo)
+    } catch (error) {
+        console.log(error)
+    }
+}
+
+
+module.exports = { Register, Welcome, Login, Profile, uploadProfile, uploadVideo, streamImage, getAllImages, VideoPage, userIdVideoPage, DisplayVideosVideoPage, DisplayThumbnails, DeleteVideo }
