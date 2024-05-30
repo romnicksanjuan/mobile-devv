@@ -1,6 +1,7 @@
 const User = require('../model/user')
 const Video = require('../model/video')
 const jwt = require('jsonwebtoken')
+const moment = require('moment');
 
 
 const multer = require('multer');
@@ -11,6 +12,7 @@ const path = require('path');
 
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffmpeg = require('fluent-ffmpeg');
+const user = require('../model/user');
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -95,6 +97,18 @@ const Profile = async (req, res) => {
 
 }
 
+const CheckToken = async (req, res) => {
+    const _id = req.userId
+
+    try {
+        const user = await User.findOne({ _id })
+        // console.log(user)
+        return res.json(user)
+    } catch (error) {
+        console.log(error)
+    }
+}
+
 const uploadProfile = async (req, res) => {
     const _id = req.params.userId
     console.log(_id)
@@ -124,7 +138,8 @@ const uploadVideo = async (req, res) => {
 
     const info = {
         userId: userId,
-        videoTitle: videoInfo.title
+        videoTitle: videoInfo.title,
+
     }
 
     console.log('info', info)
@@ -136,7 +151,9 @@ const uploadVideo = async (req, res) => {
         // Upload video to GridFS
         const videoUploadStream = bucketVideos.openUploadStream(videoFilename, {
             contentType: req.file.mimetype,
-
+            metadata: {
+                views: 0
+            }
         });
         videoUploadStream.write(videoBuffer);
 
@@ -149,8 +166,37 @@ const uploadVideo = async (req, res) => {
 
             // Upload thumbnail to GridFS
 
-            await saveThumbnailToGridFS(thumbnailBuffer, bucketImages, videoID, info);
+            const uploadStream = bucketImages.openUploadStream(thumbnailBuffer, {
+                metadata: {
+                    videoID: videoID,
+                    userId: userId,
+                    videoTitle: videoInfo.title,
+                    views: 0,
+                    likes: 0,
+                }
+            })
 
+            fs.createReadStream(thumbnailBuffer)
+                .pipe(uploadStream)
+                .on('error', (err) => {
+                    console.log(err)
+                })
+                .on('finish', () => {
+                    console.log('thubmnail upload successfully')
+                });
+
+
+            console.log('thumbnailId:', uploadStream.id)
+
+            await metadata({
+                videoID: videoID,
+                thumbnailId: uploadStream.id,
+                userId: userId,
+                videoTitle: videoInfo.title,
+                views: 0,
+                likes: 0,
+                viewLogs: [{ userId: null, timestamp: new Date() }]
+            })
             // Store metadata associating video and thumbnail
             const videoId = videoUploadStream.id;
 
@@ -203,32 +249,20 @@ async function generateThumbnail(videoBuffer, thumbnailPath) {
 }
 
 
-async function saveThumbnailToGridFS(thumbnailPath, bucketImages, videoID, info) {
-    return new Promise((resolve, reject) => {
-        const uploadStream = bucketImages.openUploadStream(thumbnailPath, {
-            metadata: {
-                videoID: videoID,
-                userId: info.userId,
-                videoTitle: info.videoTitle
-            }
-        });
-        console.log('thumbnailId:', uploadStream.id)
-        fs.createReadStream(thumbnailPath)
-            .pipe(uploadStream)
-            .on('error', (err) => {
-                reject(err);
-            })
-            .on('finish', (file) => {
-                console.log('thubmnail upload successfully')
-                resolve(file);
-            });
-    });
+const metadata = async (info) => {
+    try {
+        const data = await db.collection('metadata').insertOne(info)
+        console.log('data:', data)
+    } catch (error) {
+        console.log(error)
+    }
 }
 
 
 const getAllImages = async (req, res) => {
 
     try {
+
         const images = await db.collection('thumbnails.files').find().toArray();
         if (!images || images.length === 0) {
             return res.status(404).json({ message: 'No files found' });
@@ -237,13 +271,19 @@ const getAllImages = async (req, res) => {
         const videosWithAuthors = await Promise.all(images.map(async (file) => {
 
             const author = await db.collection('users').findOne({ _id: new ObjectId(file.metadata.userId) });
+            const metadata = await db.collection('metadata').findOne({ thumbnailId: new ObjectId(file._id) })
+
+            // console.log(metadata.views)
             // console.log('author:',author)
             return {
                 videoId: file.metadata.videoID,
                 userId: author._id,
                 thumnailId: file._id,
                 filename: file.filename,
-                videoTitle: file.metadata.videoTitle,
+                metadataId: metadata._id,
+                views: metadata.views,
+                likes: metadata.likes,
+                videoTitle: metadata.videoTitle,
                 authorName: author ? author.name : 'Unknown',
                 profileImage: author ? author.profileImage : 'Unknown',
             };
@@ -312,16 +352,19 @@ const VideoPage = async (req, res) => {
 
 const userIdVideoPage = async (req, res) => {
     try {
-        const video = await db.collection('thumbnails.files').findOne({ _id: new ObjectId(req.params.thumnailId) })
-        // console.log('usrId:', video.metadata.userId)
-        const user = await db.collection('users').findOne({ _id: new ObjectId(video.metadata.userId) })
+        // const video = await db.collection('thumbnails.files').findOne({ _id: new ObjectId(req.params.thumnailId) })
+        const metadata = await db.collection('metadata').findOne({ _id: new ObjectId(req.params.metadataId) })
+        console.log('views:', metadata.views)
+        const user = await db.collection('users').findOne({ _id: new ObjectId(metadata.userId) })
         // console.log('user:',user)
         const data = {
-            videoTitle: video.metadata.videoTitle,
+            videoTitle: metadata.videoTitle,
             profileImage: user.profileImage,
-            name: user.name
+            name: user.name,
+            views: metadata.views,
+            likes: metadata.likes
         }
-        // console.log('title:',data)
+        // console.log('title:', data)
         res.json(data)
     } catch (error) {
         console.log(error)
@@ -359,7 +402,7 @@ const DeleteVideo = async (req, res) => {
         const videoId = new ObjectId(req.params.videoId)
         const checkVideo = await db.collection('thumbnails.files').findOne({ _id: videoId })
 
-       
+
         if (!checkVideo) {
             console.log('cannot find video id')
             return;
@@ -368,7 +411,7 @@ const DeleteVideo = async (req, res) => {
         console.log('videoID associated:', checkVideo.metadata.videoID)
         await db.collection('thumbnails.files').deleteOne({ _id: new ObjectId(checkVideo._id) })
 
-        if(!checkVideo.metadata.videoID){
+        if (!checkVideo.metadata.videoID) {
             console.log('error')
             return;
         }
@@ -379,5 +422,90 @@ const DeleteVideo = async (req, res) => {
     }
 }
 
+const VideoViews = async (req, res) => {
+    try {
+        const bucket = db.collection('metadata')
 
-module.exports = { Register, Welcome, Login, Profile, uploadProfile, uploadVideo, streamImage, getAllImages, VideoPage, userIdVideoPage, DisplayVideosVideoPage, DisplayThumbnails, DeleteVideo }
+        console.log(req.params.metadataId)
+
+        const file = await bucket.findOne({ _id: new ObjectId(req.params.metadataId) })
+
+        console.log('viewlogs', file.viewLogs.map(log => log.userId === req.params.userId))
+        console.log('views:', file.views)
+
+
+
+        if (!file) {
+            console.log('some error or file not found')
+        }
+        const count = file.views += 1
+        console.log(count)
+
+        await bucket.updateOne(
+            { _id: new ObjectId(file._id) }, {
+            $set: {
+                views: count,
+                viewLogs: [{ userId: req.params.userId, timestamp: new Date() }]
+            },
+            // $set: {
+
+            // }
+        }
+        );
+
+
+    } catch (error) {
+        console.log(error)
+    }
+}
+
+
+const canIncrementView = async (video, userId) => {
+    try {
+        const lastViewLog = video.viewLogs.find(log => log.userId === userId);
+        // console.log('lastViewLog:', lastViewLog)
+        // console.log('ll:', video)
+        // console.log('us:', userId)
+
+        if (!lastViewLog) {
+            console.log('lastViewLog:', true)
+            return true;
+
+        }
+
+        const lastViewTime = moment(lastViewLog.timestamp);
+        const now = moment();
+
+        return now.diff(lastViewTime, 'minutes') >= 15;
+    } catch (error) {
+        console.log(error)
+    }
+};
+
+
+
+const check = async (req, res) => {
+    const { videoId, userId } = req.body;
+
+    const metadata = await db.collection('metadata')
+
+
+
+
+    try {
+        let video = await metadata.findOne({ _id: new ObjectId(videoId) });
+
+        console.log('video:', video)
+
+        const canIncrement = await canIncrementView(video, userId);
+
+        console.log('canIncrement', canIncrement)
+
+        res.status(200).send({ canIncrementView: canIncrement });
+    } catch (error) {
+        res.status(500).send({ message: 'Error checking view count', error });
+    }
+};
+
+
+module.exports = { Register, Welcome, Login, Profile, uploadProfile, uploadVideo, streamImage, getAllImages, VideoPage, userIdVideoPage, DisplayVideosVideoPage, DisplayThumbnails, DeleteVideo, VideoViews, check, CheckToken }
